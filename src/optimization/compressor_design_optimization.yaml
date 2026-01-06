@@ -1,0 +1,138 @@
+# CCD centrifugal compressor design optimization config (TurboFlow-style layout)
+# Geometry/operating baselines taken from the default examples/run_compressor.py case
+# (case_index = -1, last entry: Olmedo and Schiffmann stage 2 in known_compressors.yml).
+# Decision variables and bounds reflect the provided design table (ratios -> dimensional via r4 baseline where needed).
+
+turbomachinery: centrifugal_compressor
+
+geometry:
+  # Baseline geometry (meters, radians where applicable)
+  r1: 0.0154
+  r2s: 0.0154
+  r2h: 0.0056
+  beta2: -45.0
+  beta2s: -56.0
+  alpha2: 0.0
+  r4: 0.0238
+  b4: 0.0041
+  beta4: -30.0
+  n_blades: 11
+  n_splits: 0
+  r5: 0.0452
+  b5: 0.00225
+  blade_e: 0.85e-3
+  rug_imp: 1.0e-3
+  clearance: 0.2e-3
+  backface: 0.15e-3
+  rug_ind: 1.0e-3
+  l_ind: 0.0154
+  l_comp: 0.01
+  blockage: [1.0, 1.0, 1.0, 1.0, 1.0]
+
+operating:
+  fluid: Ammonia
+  in_P: 465000.0
+  in_T: 305.0
+  mass: 0.12            # kg/s (keep example value)
+  speed_rpm: 130000.0    # rpm (keep example value)
+
+loss_config:
+  diffuser_type: vaneless
+  diffuser: {}
+
+performance_analysis:
+  # Placeholder for symmetry with turboflow configs; not used directly in CCD optimizer.
+  solver_options:
+    method: hybr
+    tolerance: 1e-8
+    max_iterations: 100
+    derivative_method: "2-point"
+    derivative_abs_step: 1e-6
+    print_convergence: true
+    plot_convergence: false
+
+design_optimization:
+  objective_function:
+    variable: summary.efficiency   # maximize isentropic efficiency
+    scale: 1.0
+    type: maximize
+
+  # Decision variables; keys map to Geometry/OperatingCondition via prefixes geom./op.
+  variables:
+    op.speed_rpm:             # N (rotational speed)
+      value: 130000.0
+      lower_bound: 80000.0
+      upper_bound: 160000.0
+    geom.r4:                  # r2 (impeller exit radius)
+      value: 0.0238
+      lower_bound: 0.01904
+      upper_bound: 0.03094
+    ratio.r2s_over_r4:        # r1s/r2 ratio
+      value: 0.647
+      lower_bound: 0.55
+      upper_bound: 0.90
+    ratio.r2h_over_r2s:       # r1h/r1s ratio
+      value: 0.364
+      lower_bound: 0.20
+      upper_bound: 0.60
+    ratio.b4_over_r4:         # b2/r2 ratio
+      value: 0.172
+      lower_bound: 0.05
+      upper_bound: 0.25
+    geom.beta4:               # β2b impeller exit blade angle
+      value: -30.0
+      lower_bound: -45.0
+      upper_bound: 0.0
+    geom.beta2:               # β1b impeller inlet average blade angle
+      value: -45.0
+      lower_bound: -70.0
+      upper_bound: -20.0
+
+  constraints:
+    - variable: summary.PR
+      type: ">"
+      value: 1.4
+      normalize: true
+    - variable: summary.valid
+      type: ">"
+      value: 0.5     # enforce feasible solutions
+      normalize: false
+    - variable: summary.M2s_rel   # Relative Mach at impeller inlet shroud (station 2)
+      type: "<"
+      value: 1.4
+      normalize: false
+    - variable: summary.M2_rel    # Relative Mach at impeller inlet (station 2)
+      type: "<"
+      value: 0.9
+      normalize: false
+    - variable: summary.W4_over_W2s  # Ratio of exit (4) to inlet shroud (2s) relative velocities
+      type: ">"
+      value: 0.25
+      normalize: false
+    - variable: summary.alpha4_exit  # Impeller exit absolute flow angle (deg, station 4)
+      type: "<"
+      value: 85.0
+      normalize: false
+    - variable: summary.U4        # Impeller exit peripheral speed (m/s, station 4)
+      type: "<"
+      value: 400.0
+      normalize: false
+    - variable: summary.r5_over_r4 # Vaneless diffuser radius ratio (model uses r5/r4)
+      type: ">"
+      value: 1.05
+      normalize: false
+    - variable: summary.r5_over_r4
+      type: "<"
+      value: 2.0
+      normalize: false
+
+  solver_options:
+    library: scipy
+    method: slsqp
+    derivative_method: 2-point
+    print_convergence: true
+    plot_convergence: false
+    update_on: gradient
+    options:
+      maxiter: 100
+      ftol: 0.000001

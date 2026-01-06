@@ -1,57 +1,71 @@
 """
-Recirculation loss models
+Recirculation Loss Models
+
+Models for recirculation losses in impellers due to flow separation.
+Require outlet conditions for proper diffusion analysis (Pass B timing).
 """
 
 import numpy as np
-from math import exp, radians, tan
-from losses.registry import LossModelRegistry, LossContext
+import logging
+from ..registry import register_impeller
+from ..context import ImpellerContext
 
+logger = logging.getLogger(__name__)
 
-@LossModelRegistry.register("impeller", "rodgers_recirculation")
-def recirculation_rodgers(context: LossContext) -> float:
+@register_impeller("recirculation", "coppage")
+def recirculation_coppage(ctx: ImpellerContext, **kwargs) -> float:
     """
-    Recirculation losses according to Rodgers
-    (RadComp implementation)
-    
-    Returns
-    -------
-    float
-        Recirculation loss (J/kg)
+    Coppage (1956) recirculation loss (literature-consistent).
+    Δh_rc = 0.02 * sqrt(tan(alpha_exit)) * Df * U_exit^2
     """
-    geom = context.geometry
-    Df = context.velocity_triangle. get("diffusion_factor", 0.0)
-    alpha = context.velocity_triangle.get("alpha4", 0.0)
-    n_rot = context.operating_condition.n_rot
-    
-    # Recirculation factor
-    K_rc = 0.02 if Df < 0.4 else 0.02 * exp(3 * (Df - 0.4))
-    
-    # Recirculation loss
-    u4 = geom.r4 * n_rot
-    v_t4 = u4 * tan(radians(alpha))
-    dh_rc = K_rc * v_t4**2
-    
-    return dh_rc
+    try:
+        Z = ctx.geom.n_blades + ctx.geom.n_splits
+        r2s = ctx.geom.r2s       # inlet tip radius
+        r4  = ctx.geom.r4
 
+        # Prefer inlet shroud (tip) relative speed if you store it; fall back to station 1:
+        W2s = ctx.st2.Ws    # relative at inlet shroud
+        W4  = ctx.st4.W    # relative at exit
 
-@LossModelRegistry.register("impeller", "aungier_recirculation")
-def recirculation_aungier(context: LossContext) -> float:
+        # Euler head
+        dH_Euler = ctx.U4 * ctx.V4u - ctx.U2 * ctx.V2u
+        dH_Euler = max(dH_Euler, 1e-6)
+
+        # Coppage diffusion factor (note the geometry bracket)
+        geom_bracket = (Z/np.pi) * (1.0 - r2s/r4) + 2.0 * (r2s/r4)
+        Df = 1.0 - (W4 / W2s) + 0.75 * (dH_Euler / ctx.U4**2) * (W4 / W2s) * geom_bracket
+
+        return max(0.0, 0.02 * np.sqrt(max(0.0, np.tan(ctx.st4.alpha))) * Df**2 * (ctx.U4**2))  # alpha in radians
+
+    except Exception as e:
+        logger.warning(f"Coppage recirculation calculation failed: {e}")
+        return 0.0
+
+@register_impeller("recirculation", "oh_hyperbolic")
+def recirculation_oh_hyperbolic(ctx: ImpellerContext, **kwargs) -> float:
     """
-    Recirculation losses according to Aungier
+    Oh et al. (1997) hyperbolic recirculation loss (angles in radians).
+    Δh_rc = 8e-5 * sinh(3.5 * alpha_exit^3) * (Df^2) * U_exit^2
     """
-    geom = context.geometry
-    phi = context.velocity_triangle.get("flow_coefficient", 0.0)
-    n_rot = context.operating_condition.n_rot
-    
-    # Critical flow coefficient
-    phi_crit = 0.3  # Typical value, should be calibrated
-    
-    if phi < phi_crit: 
-        # Recirculation occurs
-        K_rc = 0.1 * (phi_crit - phi) / phi_crit
-        u4 = geom.r4 * n_rot
-        dh_rc = K_rc * u4**2
-    else: 
-        dh_rc = 0.0
-    
-    return dh_rc
+    try:
+        Z = ctx.geom.n_blades + ctx.geom.n_splits
+        r2s = ctx.geom.r2s       # inlet tip radius
+        r4  = ctx.geom.r4
+
+        # Prefer inlet shroud (tip) relative speed if you store it; fall back to station 1:
+        W2s = ctx.st2.Ws    # relative at inlet shroud
+        W4  = ctx.st4.W     # relative at exit
+
+        # Euler head
+        dH_Euler = ctx.U4 * ctx.V4u - ctx.U2 * ctx.V2u
+        dH_Euler = max(dH_Euler, 1e-6)
+
+        # Coppage diffusion factor (note the geometry bracket)
+        geom_bracket = (Z/np.pi) * (1.0 - r2s/r4) + 2.0 * (r2s/r4)
+        Df = 1.0 - (W4 / W2s) + 0.75 * (dH_Euler / ctx.U4**2) * (W4 / W2s) * geom_bracket
+
+        return max(0.0, 8e-5 * np.sinh(3.5 * (ctx.st4.alpha**3)) * (Df**2) * (ctx.U4**2))  # alpha in radians
+
+    except Exception as e:
+        logger.warning(f"Oh hyperbolic recirculation calculation failed: {e}")
+        return 0.0

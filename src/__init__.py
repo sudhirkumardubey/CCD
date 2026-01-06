@@ -9,7 +9,11 @@ __author__ = "Sudhir Kumar Dubey"
 from .core.compressor import CentrifugalCompressor
 from .geometry.geometry import Geometry
 from .conditions.operating import OperatingCondition, ThermoProp, thermo_prop
-from .analysis.performance import PerformanceMap
+from .analysis.performance import PerformanceMap, run_radcomp_performance_plot
+from .optimization.compressor_optimization import (
+    compute_optimal_compressor,
+    CompressorOptimizationProblem,
+)
 
 __all__ = [
     "CentrifugalCompressor",
@@ -18,4 +22,7 @@ __all__ = [
     "ThermoProp",
     "thermo_prop",
     "PerformanceMap",
+    "run_radcomp_performance_plot",
+    "compute_optimal_compressor",
+    "CompressorOptimizationProblem",
 ]

@@ -1,39 +1,21 @@
-"""
-Mathematical utility functions
-"""
+"""Mathematical utility functions (aligned with RadComp correlations)."""
 
+import math
 import numpy as np
+from scipy import optimize
 
 
-def moody(Re:  float, roughness_ratio: float) -> float:
-    """
-    Calculate Moody friction factor using Colebrook-White equation
-    
-    Parameters
-    ----------
-    Re : float
-        Reynolds number
-    roughness_ratio : float
-        Relative roughness (epsilon/D)
-    
-    Returns
-    -------
-    float
-        Friction factor
-    """
-    if Re < 2300:
-        # Laminar flow
-        return 64.0 / Re
-    else:
-        # Turbulent flow - use Swamee-Jain approximation
-        # More stable than iterative Colebrook-White
-        if roughness_ratio < 1e-8:
-            # Smooth pipe (Blasius)
-            return 0.316 / (Re ** 0.25)
-        else:
-            num = 0.25
-            denom = (np.log10(roughness_ratio/3.7 + 5.74/(Re**0.9)))**2
-            return num / denom
+def moody(Re: float, roughness_ratio: float) -> float:
+    """Calculate Moody friction factor using Colebrook-White (RadComp parity)."""
+    if Re < 2300.0:
+        return 64.0 / Re / 4.0
+
+    def colebrook(x: float) -> float:
+        # fsolve passes ndarray; coerce scalar to avoid array math issues
+        f = float(x[0]) if isinstance(x, (list, tuple, np.ndarray)) else float(x)
+        return -2 * math.log10(roughness_ratio / 3.72 + 2.51 / Re / f**0.5) - 1 / f**0.5
+
+    return optimize.fsolve(colebrook, 0.02)[0] / 4.0
 
 
 def cosd(angle_deg: float) -> float:

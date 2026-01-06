@@ -1,155 +1,177 @@
 """
-Geometry module based on RadComp structure
+Geometry implementation aligned with RadComp, with compatibility aliases
+for existing CCD code. Areas, slip, blockage, and hydraulic diameter match
+radcomp-main/radcompressor/geometry.py behavior.
 """
 
-from dataclasses import dataclass, field
-from typing import Optional
-import numpy as np
-from math import pi
+from dataclasses import dataclass, field, fields
+from typing import List, Union
+import math
 
 
 @dataclass
-class Geometry: 
+class Geometry:
+    """Radial compressor geometry (RadComp-compatible).
+
+    Primary fields mirror radcomp-main/radcompressor/geometry.py. Compatibility
+    properties are provided for prior CCD usage (r1h/r1s, BF2/BF4, etc.).
     """
-    Centrifugal compressor geometry following RadComp structure
-    """
-    # Primary radii
-    r1h: float  # Hub radius at inducer inlet
-    r1s: float  # Shroud radius at inducer inlet
-    r2h: float  # Hub radius at impeller inlet
-    r2s:  float  # Shroud radius at impeller inlet (inducer exit)
-    r4:  float   # Impeller outlet radius
-    r5: float   # Diffuser outlet radius
-    
-    # Widths
-    b2:  float   # Impeller inlet width
-    b4: float   # Impeller outlet width
-    b5: float   # Diffuser outlet width
-    
-    # Blade angles (in degrees)
-    alpha2: float = 0.0     # Absolute flow angle at impeller inlet
-    beta2: float = 0.0      # Relative blade angle at impeller inlet
-    beta4: float = -50.0    # Blade angle at impeller outlet (typically negative)
-    
-    # Blade parameters
-    n_blades: int = 12      # Number of impeller blades
-    n_splitter: int = 0     # Number of splitter blades
-    t_b: float = 0.002      # Blade thickness (m)
-    t_cl: float = 0.0002    # Tip clearance (m)
-    
-    # Slip factor
-    slip: float = 0.9       # Slip factor (Wiesner, Stanitz, etc.)
-    
-    # Blockage factors
-    BF2: float = 0.95       # Blockage factor at impeller inlet
-    BF4: float = 0.95       # Blockage factor at impeller outlet
-    
-    # Inducer parameters
-    L_ind: float = 0.05     # Inducer axial length (m)
-    
-    # Derived parameters (calculated in __post_init__)
-    r2rms: float = field(init=False)  # RMS radius at impeller inlet
-    A1: float = field(init=False)     # Inducer inlet area
-    A2: float = field(init=False)     # Impeller inlet area
-    A2_eff: float = field(init=False) # Effective impeller inlet area
-    A4: float = field(init=False)     # Impeller outlet area
-    A4_eff: float = field(init=False) # Effective impeller outlet area
-    A5: float = field(init=False)     # Diffuser outlet area
-    A_x: float = field(init=False)    # Inlet flow area (axial projection)
-    A_y: float = field(init=False)    # Inlet flow area (tangential projection)
-    
-    def __post_init__(self):
-        """Calculate derived geometric parameters"""
-        # RMS radius at impeller inlet
-        self.r2rms = np.sqrt(0.5 * (self.r2s**2 + self.r2h**2))
-        
-        # Areas
-        self.A1 = pi * (self.r1s**2 - self.r1h**2)
-        self.A2 = pi * (self.r2s**2 - self.r2h**2)
-        self.A2_eff = self.A2 * self.BF2 * np.cos(np.radians(self.alpha2))
-        self.A4 = 2 * pi * self.r4 * self.b4
-        self.A4_eff = self.A4 * self.BF4
-        self.A5 = 2 * pi * self.r5 * self.b5
-        
-        # Inlet flow areas for velocity triangle calculations
-        self.A_x = self.A2 * np.cos(np.radians(self.alpha2))
-        self.A_y = self.A2 * np.sin(np.radians(self.alpha2))
-    
-    @classmethod
-    def from_nondimensional(cls, r4: float, beta4: float, 
-                           b4r4: float, n_blades: int,
-                           r2sor4: float, r2sor2h: float,
-                           Cmin: float, CR: float, **kwargs):
-        """
-        Create geometry from non-dimensional parameters (Mounier et al.  approach)
-        
-        Parameters
-        ----------
-        r4 : float
-            Impeller outlet radius
-        beta4 : float
-            Blade angle at outlet (degrees)
-        b4r4 : float
-            Width-to-radius ratio at outlet
-        n_blades : int
-            Number of blades
-        r2sor4 : float
-            Shroud radius ratio at inlet
-        r2sor2h : float
-            Shroud-to-hub radius ratio at inlet
-        Cmin : float
-            Minimum clearance ratio
-        CR : float
-            Contraction ratio
-        """
-        b4 = b4r4 * r4
-        r2s = r2sor4 * r4
-        r2h = r2s / r2sor2h
-        
-        # Inducer sizing
-        r1s = r2s + Cmin * r4
-        r1h = r2h - Cmin * r4
-        
-        # Diffuser sizing
-        r5 = CR * r4
-        b5 = b4  # Assume constant width for simplicity
-        
-        # Impeller inlet width
-        b2 = r2s - r2h
-        
-        return cls(
-            r1h=r1h, r1s=r1s,
-            r2h=r2h, r2s=r2s,
-            r4=r4, r5=r5,
-            b2=b2, b4=b4, b5=b5,
-            beta4=beta4,
-            n_blades=n_blades,
-            **kwargs
+
+    # RadComp-native fields
+    r1: float  # Inducer inlet radius
+    r2s: float  # Shroud tip radius
+    r2h: float  # Impeller hub radius
+    beta2: float  # Mid-blade impeller inlet angle (deg)
+    beta2s: float  # Impeller shroud angle (deg)
+    alpha2: float  # Inlet flow angle (deg)
+    r4: float  # Impeller tip radius at exit
+    b4: float  # Impeller blade height at exit
+    r5: float  # Diffuser outlet radius
+    b5: float  # Diffuser passage width
+    beta4: float  # Impeller outlet angle (deg)
+    n_blades: int  # Number of full blades
+    n_splits: int  # Number of splitter blades
+    blade_e: float  # Blade thickness
+    rug_imp: float  # Impeller surface roughness
+    clearance: float  # Tip clearance
+    backface: float  # Backface clearance
+    rug_ind: float  # Inducer surface roughness
+    l_ind: float  # Inducer length
+    l_comp: float  # Impeller length (no impact on calc in RadComp)
+
+    # Optional vaned diffuser inputs (TurboFlow-style)
+    vd_leading_edge_angle: float = 0.0
+    vd_trailing_edge_angle: float = 0.0
+    vd_number_of_vanes: int = 0
+    vd_throat_location_factor: float = 0.5
+    vd_area_throat_ratio: float = 1.0
+
+    blockage: List[float] = field(default_factory=lambda: [1, 1, 1, 1, 1])
+
+    @property
+    def r2rms(self) -> float:
+        """RMS radius at impeller inlet."""
+        return math.sqrt((self.r2s ** 2 + self.r2h ** 2) / 2.0)
+
+    @property
+    def A1_eff(self) -> float:
+        """Effective area at station 1 including blockage."""
+        return self.r1 ** 2 * math.pi * self.blockage[0]
+
+    @property
+    def A2(self) -> float:
+        """Geometric area at impeller inlet."""
+        return (self.r2s ** 2 - self.r2h ** 2) * math.pi
+
+    @property
+    def A2_eff(self) -> float:
+        """Effective area at station 2 including blockage and flow angle."""
+        return self.A2 * self.blockage[1] * math.cos(self.alpha2 / 180.0 * math.pi)
+
+    @property
+    def A_x(self) -> float:
+        """Axial projection of inlet flow area (station 2)."""
+        return self.A2 * self.blockage[1] * math.cos(self.beta2 / 180.0 * math.pi)
+
+    @property
+    def A_y(self) -> float:
+        """Tangential projection of inlet flow area accounting for blades."""
+        return (
+            (self.r2s ** 2 - self.r2h ** 2) * math.pi * math.cos(self.beta2 / 180 * math.pi)
+            - (self.r2s - self.r2h) * self.blade_e * self.n_blades
+        ) * self.blockage[2]
+
+    @property
+    def beta2_opt(self) -> float:
+        """Optimal beta2 for given A_x/A_y (RadComp helper)."""
+        return math.atan(self.A_x / self.A_y * math.tan(self.beta2 / 180 * math.pi)) * 180 / math.pi
+
+    @property
+    def slip(self) -> float:
+        """Slip factor according to Wiesner-Busemann (RadComp)."""
+        return 1 - (math.cos(self.beta4 / 180 * math.pi)) ** 0.5 / (self.n_blades + self.n_splits) ** 0.7
+
+    @property
+    def eps_limit(self):
+        """Placeholder kept for parity with RadComp API."""
+        return None
+
+    @property
+    def hydraulic_diameter(self):
+        """Return hydraulic diameter and length per RadComp formulation."""
+        la = self.r2h / self.r2s
+        Dh = 2 * self.r4 * (
+            1.0 /
+            (self.n_blades / math.pi / math.cos(self.beta4 / 180 * math.pi) + 2.0 * self.r4 / self.b4)
+            + self.r2s / self.r4 /
+            (2.0 / (1.0 - la)
+             + 2.0 * self.n_blades / math.pi / (1 + la)
+             * math.sqrt(1 + (1 + la ** 2 / 2) * math.tan(self.beta2s / 180 * math.pi) ** 2))
         )
-    
-    def validate(self):
-        """Validate geometry parameters"""
-        errors = []
-        
-        if self.r1h >= self.r1s:
-            errors.append("Inducer hub radius must be less than shroud radius")
-        
-        if self.r2h >= self.r2s:
-            errors.append("Impeller inlet hub radius must be less than shroud radius")
-        
-        if self. r2s >= self.r4:
-            errors.append("Impeller inlet shroud radius must be less than outlet radius")
-        
-        if self.r4 >= self.r5:
-            errors.append("Impeller outlet radius must be less than diffuser outlet radius")
-        
-        if self.n_blades < 4:
-            errors.append("Number of blades must be at least 4")
-        
-        if not -90 < self.beta4 < 0:
-            errors.append("Outlet blade angle should be between -90 and 0 degrees")
-        
-        if errors:
-            raise ValueError("Geometry validation failed:\n" + "\n".join(errors))
-        
-        return True
+        Lh = self.r4 * (1 - self.r2rms * 2 / 0.3048) / math.cos(self.beta4 / 180 * math.pi)
+        return Dh, Lh
+
+    @classmethod
+    def from_dict(cls, data: dict, blockage: Union[List[float], None] = None):
+        """Create Geometry from dict (RadComp-style)."""
+        safe_names = [f.name for f in fields(cls)]
+        parsed = {}
+
+        if blockage is None and "blockage1" in data:
+            blockage = [data[f"blockage{i+1}"] for i in range(5)]
+
+        if blockage is None:
+            raise ValueError("Blockage needs to be provided as an argument or in data.")
+
+        for key, val in data.items():
+            key_l = key.lower()
+            if key_l in safe_names:
+                parsed[key_l] = val
+
+        parsed["blockage"] = blockage
+        return cls(**parsed)
+
+    # Compatibility aliases for existing CCD code ---------------------------------
+    @property
+    def r1s(self) -> float:
+        return self.r1
+
+    @property
+    def r1h(self) -> float:
+        return 0.0
+
+    @property
+    def b2(self) -> float:
+        return self.r2s - self.r2h
+
+    @property
+    def t_cl(self) -> float:
+        return self.clearance
+
+    @property
+    def n_splitter(self) -> int:
+        return self.n_splits
+
+    @property
+    def BF2(self) -> float:
+        return self.blockage[1]
+
+    @property
+    def BF4(self) -> float:
+        return self.blockage[3]
+
+    @property
+    def A1(self) -> float:
+        return math.pi * (self.r1s ** 2 - self.r1h ** 2)
+
+    @property
+    def A4(self) -> float:
+        return 2 * math.pi * self.r4 * self.b4
+
+    @property
+    def A4_eff(self) -> float:
+        return self.A4 * self.blockage[3]
+
+    @property
+    def A5(self) -> float:
+        return 2 * math.pi * self.r5 * self.b5 * self.blockage[4]

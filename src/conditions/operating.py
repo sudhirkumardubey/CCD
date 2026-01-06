@@ -4,122 +4,121 @@ Direct replication of RadComp's thermo. py implementation
 """
 
 from dataclasses import dataclass
-import CoolProp.CoolProp as CP
-from typing import Optional
+import CoolProp as CP
+from typing import Optional, Union
 import numpy as np
+
+# Optional: use AbstractState for robust HS flashes when PropsSI fails
+try:
+    from CoolProp import AbstractState
+except Exception:  # pragma: no cover
+    AbstractState = None
+
+# Mapping constants to mirror RadComp's thermolibs/coolprop.py
+cp_inputs = {
+    "PT": (CP.iP, CP.iT),
+    "HS": (CP.iHmass, CP.iSmass),
+    "PH": (CP.iP, CP.iHmass),
+    "PS": (CP.iP, CP.iSmass),
+    "TQ": (CP.iT, CP.iQ),
+    "PQ": (CP.iP, CP.iQ),
+}
+
+cp_outputs = {"P": CP.iP, "T": CP.iT, "D": CP.iDmass, "H": CP.iHmass, "S": CP.iSmass}
+
+cp_phases = {
+    CP.iphase_gas: "gas",
+    CP.iphase_twophase: "twophase",
+    CP.iphase_supercritical: "supercritical",
+    CP.iphase_supercritical_gas: "supercritical_gas",
+}
 
 
 @dataclass
 class ThermoProp:
     """
-    Thermodynamic properties at a point
-    Matches RadComp's ThermoProp class structure
+    Thermodynamic properties at a point (defaults allow empty construction).
     """
-    P:  float  # Pressure (Pa)
-    T: float  # Temperature (K)
-    D: float  # Density (kg/m³)
-    H: float  # Enthalpy (J/kg)
-    S: float  # Entropy (J/kg-K)
-    A: float  # Speed of sound (m/s)
-    V: Optional[float] = None  # Kinematic viscosity (m²/s)
-    mu: Optional[float] = None  # Dynamic viscosity (Pa·s)
+
+    P: float = float("nan")  # Pressure (Pa)
+    T: float = float("nan")  # Temperature (K)
+    D: float = float("nan")  # Density (kg/m³)
+    H: float = float("nan")  # Enthalpy (J/kg)
+    S: float = float("nan")  # Entropy (J/kg-K)
+    A: float = float("nan")  # Speed of sound (m/s)
+    V: Optional[float] = None  # Dynamic viscosity (Pa·s) to match RadComp's V usage
+    mu: Optional[float] = None  # Dynamic viscosity (Pa·s) duplicate for compatibility
     cp: Optional[float] = None  # Specific heat at constant pressure (J/kg-K)
     cv: Optional[float] = None  # Specific heat at constant volume (J/kg-K)
     gamma: Optional[float] = None  # Specific heat ratio
-    fld: Optional[str] = None  # Fluid name
+    phase: Optional[str] = None  # Phase descriptor
+    fld: Optional[Union["CoolPropFluid", str]] = None  # Fluid reference (object or name)
 
 
 class CoolPropFluid:
-    """
-    CoolProp fluid wrapper - matches RadComp's implementation
-    """
+    """CoolProp fluid wrapper replicating RadComp thermolibs.coolprop behavior."""
     
     def __init__(self, fluid_name: str):
-        """
-        Initialize CoolProp fluid
-        
-        Parameters
-        ----------
-        fluid_name : str
-            Fluid name (e.g., 'Air', 'N2', 'CO2')
-        """
+        """Initialize CoolProp fluid with HEOS backend."""
         self.name = fluid_name
+        if AbstractState is None:
+            raise ImportError("CoolProp AbstractState not available")
+        self.state = AbstractState("HEOS", self.name.upper())
+
+    def __getstate__(self):
+        return {"name": self.name}
+
+    def __setstate__(self, state):
+        self.name = state.get("name")
+        if AbstractState is None:
+            raise ImportError("CoolProp AbstractState not available")
+        self.state = AbstractState("HEOS", self.name.upper())
         
-    def thermo_prop(self, input_pair: str, prop1: float, prop2: float) -> ThermoProp:
-        """
-        Get thermodynamic properties
-        Replicates RadComp's thermo_prop method exactly
-        
-        Parameters
-        ----------
-        input_pair : str
-            Input pair:  'PT', 'PS', 'PH', 'HS', 'DH', etc.
-        prop1 : float
-            First property value
-        prop2 :  float
-            Second property value
-            
-        Returns
-        -------
-        ThermoProp
-            Thermodynamic properties
-        """
+    def thermo_prop(self, input_pair: Union[str, int], prop1: float, prop2: float) -> ThermoProp:
+        """Get thermodynamic properties using CoolProp AbstractState (RadComp parity)."""
+        prop1 = float(np.asarray(prop1))
+        prop2 = float(np.asarray(prop2))
+
         try:
-            # Get the two input properties based on input_pair
-            if input_pair == "PT": 
-                P, T = prop1, prop2
-                D = CP.PropsSI("D", "P", P, "T", T, self.name)
-                H = CP.PropsSI("H", "P", P, "T", T, self.name)
-                S = CP.PropsSI("S", "P", P, "T", T, self.name)
-                
-            elif input_pair == "PS":
-                P, S = prop1, prop2
-                D = CP.PropsSI("D", "P", P, "S", S, self.name)
-                T = CP.PropsSI("T", "P", P, "S", S, self.name)
-                H = CP.PropsSI("H", "P", P, "S", S, self.name)
-                
-            elif input_pair == "PH":
-                P, H = prop1, prop2
-                D = CP.PropsSI("D", "P", P, "H", H, self.name)
-                T = CP.PropsSI("T", "P", P, "H", H, self.name)
-                S = CP.PropsSI("S", "P", P, "H", H, self.name)
-                
-            elif input_pair == "HS":
-                H, S = prop1, prop2
-                P = CP.PropsSI("P", "H", H, "S", S, self.name)
-                T = CP.PropsSI("T", "H", H, "S", S, self.name)
-                D = CP.PropsSI("D", "H", H, "S", S, self.name)
-                
-            elif input_pair == "DH": 
-                D, H = prop1, prop2
-                P = CP.PropsSI("P", "D", D, "H", H, self.name)
-                T = CP.PropsSI("T", "D", D, "H", H, self.name)
-                S = CP.PropsSI("S", "D", D, "H", H, self.name)
-                
-            elif input_pair == "DS":
-                D, S = prop1, prop2
-                P = CP.PropsSI("P", "D", D, "S", S, self.name)
-                T = CP.PropsSI("T", "D", D, "S", S, self.name)
-                H = CP.PropsSI("H", "D", D, "S", S, self.name)
-                
-            else: 
-                raise ValueError(f"Input pair '{input_pair}' not supported")
-            
-            # Get remaining properties using P and T
-            A = CP.PropsSI("A", "P", P, "T", T, self.name)
-            mu = CP.PropsSI("V", "P", P, "T", T, self.name)  # Dynamic viscosity
-            V = mu / D  # Kinematic viscosity
-            cp_val = CP.PropsSI("C", "P", P, "T", T, self.name)
-            cv_val = CP.PropsSI("O", "P", P, "T", T, self.name)
-            gamma = cp_val / cv_val
-            
+            # Scalars only; guard against numpy arrays
+            prop1_s = float(np.asarray(prop1).reshape(()))
+            prop2_s = float(np.asarray(prop2).reshape(()))
+
+            if isinstance(input_pair, str):
+                i1, i2 = cp_inputs[input_pair]
+                update_pair = CP.CoolProp.generate_update_pair(i1, prop1_s, i2, prop2_s)
+            else:
+                update_pair = input_pair
+
+            self.state.update(*update_pair)
+
+            phase_code = self.state.phase()
+            if phase_code not in cp_phases:
+                raise RuntimeError("Not gas or two-phase")
+            phase = cp_phases[phase_code]
+
+            d = {k: self.state.keyed_output(v) for k, v in cp_outputs.items()}
+            if phase_code == CP.iphase_twophase:
+                A = self.state.saturated_vapor_keyed_output(CP.ispeed_sound)
+                V = self.state.saturated_vapor_keyed_output(CP.iviscosity)
+            else:
+                A = self.state.keyed_output(CP.ispeed_sound)
+                V = self.state.keyed_output(CP.iviscosity)
+
             return ThermoProp(
-                P=P, T=T, D=D, H=H, S=S, A=A,
-                mu=mu, V=V, cp=cp_val, cv=cv_val, 
-                gamma=gamma, fld=self.name
+                P=d["P"],
+                T=d["T"],
+                D=d["D"],
+                H=d["H"],
+                S=d["S"],
+                A=A,
+                V=V,
+                mu=V,
+                phase=phase,
+                fld=self,
             )
-            
-        except Exception as e: 
+
+        except Exception as e:
             raise RuntimeError(
                 f"CoolProp error for {self.name}: {e}\n"
                 f"Input:  {input_pair}, values: {prop1}, {prop2}"
@@ -128,14 +127,11 @@ class CoolPropFluid:
 
 @dataclass
 class OperatingCondition:
-    """
-    Operating condition definition
-    Matches RadComp's OperatingCondition structure
-    """
-    in0: ThermoProp  # Inlet thermodynamic state
-    fld: str         # Fluid name (kept for compatibility, but use in0. fld)
-    m: float         # Mass flow rate (kg/s)
-    n_rot: float     # Rotational speed (rad/s)
+    """Operating condition definition matching RadComp's structure."""
+    in0: ThermoProp                  # Inlet thermodynamic state
+    fld: Union[CoolPropFluid, str]   # Fluid (object or name string)
+    m: float                         # Mass flow rate (kg/s)
+    n_rot: float                     # Rotational speed (rad/s)
     
     def __post_init__(self):
         """Validate operating condition"""
@@ -146,7 +142,7 @@ class OperatingCondition:
 
 
 # Convenience functions to match RadComp's API
-def thermo_prop(fld: str, input_pair:  str, prop1: float, prop2: float) -> ThermoProp:
+def thermo_prop(fld: Union[CoolPropFluid, str], input_pair: str, prop1: float, prop2: float) -> ThermoProp:
     """
     Convenience function matching RadComp's usage pattern
     
@@ -166,7 +162,10 @@ def thermo_prop(fld: str, input_pair:  str, prop1: float, prop2: float) -> Therm
     ThermoProp
         Thermodynamic properties
     """
-    fluid = CoolPropFluid(fld)
+    if hasattr(fld, "thermo_prop"):
+        fluid = fld
+    else:
+        fluid = CoolPropFluid(fld)
     return fluid.thermo_prop(input_pair, prop1, prop2)
 
 
@@ -191,10 +190,33 @@ def static_from_total(total: ThermoProp, velocity:  float, fluid: str = None) ->
     if fluid is None:
         fluid = total.fld if total.fld else "Air"
     
-    h_static = total.H - 0.5 * velocity**2
+    vel = float(np.asarray(velocity).reshape(()))
+    h_static = total.H - 0.5 * vel**2
     s_static = total.S  # Isentropic assumption
-    
-    return thermo_prop(fluid, "HS", h_static, s_static)
+
+    try:
+        return thermo_prop(fluid, "HS", h_static, s_static)
+    except Exception:
+        # Fallback: use AbstractState HS flash (handles two-phase bracketing better)
+        if AbstractState is None:
+            raise
+        fluid_name = getattr(fluid, "name", fluid) or getattr(total.fld, "name", total.fld) or "Air"
+        try:
+            backend = fluid_name if isinstance(fluid_name, str) and "::" in fluid_name else f"HEOS::{fluid_name}"
+            AS = AbstractState(backend.split("::")[0], backend.split("::")[-1])
+            AS.update(CP.HmassSmass_INPUTS, float(h_static), float(s_static))
+            P = AS.p()
+            T = AS.T()
+            D = AS.rhomass()
+            A = AS.speed_sound()
+            mu = AS.viscosity()
+            V = mu if mu is not None else None
+            cp_val = AS.cpmass()
+            cv_val = AS.cvmass()
+            gamma = cp_val / cv_val if cv_val else None
+            return ThermoProp(P=P, T=T, D=D, H=h_static, S=s_static, A=A, V=V, mu=mu, cp=cp_val, cv=cv_val, gamma=gamma, fld=fluid or total.fld)
+        except Exception:
+            raise
 
 
 def total_from_static(static: ThermoProp, velocity: float, fluid: str = None) -> ThermoProp:
@@ -217,27 +239,31 @@ def total_from_static(static: ThermoProp, velocity: float, fluid: str = None) ->
     """
     if fluid is None:
         fluid = static.fld if static.fld else "Air"
-    
-    h_total = static.H + 0.5 * velocity**2
-    s_total = static.S  # Isentropic assumption
-    
-    return thermo_prop(fluid, "HS", h_total, s_total)
 
+    vel = float(np.asarray(velocity).reshape(()))
+    h_total = static.H + 0.5 * vel**2
+    s_total = static.S
 
-# Alternative:  Direct instantiation matching RadComp's pattern
-def create_fluid(name: str) -> CoolPropFluid:
-    """
-    Create a CoolProp fluid object
-    Matches RadComp's CoolPropFluid instantiation
-    
-    Parameters
-    ----------
-    name : str
-        Fluid name
-        
-    Returns
-    -------
-    CoolPropFluid
-        Fluid object with thermo_prop method
-    """
-    return CoolPropFluid(name)
+    try:
+        return thermo_prop(fluid, "HS", h_total, s_total)
+    except Exception:
+        # Fallback: use AbstractState HS flash (handles two-phase bracketing better)
+        if AbstractState is None:
+            raise
+        fluid_name = getattr(fluid, "name", fluid) or getattr(static.fld, "name", static.fld) or "Air"
+        try:
+            backend = fluid_name if isinstance(fluid_name, str) and "::" in fluid_name else f"HEOS::{fluid_name}"
+            AS = AbstractState(backend.split("::")[0], backend.split("::")[-1])
+            AS.update(CP.HmassSmass_INPUTS, float(h_total), float(s_total))
+            P = AS.p()
+            T = AS.T()
+            D = AS.rhomass()
+            A = AS.speed_sound()
+            mu = AS.viscosity()
+            V = mu if mu is not None else None
+            cp_val = AS.cpmass()
+            cv_val = AS.cvmass()
+            gamma = cp_val / cv_val if cv_val else None
+            return ThermoProp(P=P, T=T, D=D, H=h_total, S=s_total, A=A, V=V, mu=mu, cp=cp_val, cv=cv_val, gamma=gamma, fld=fluid or static.fld)
+        except Exception:
+            raise

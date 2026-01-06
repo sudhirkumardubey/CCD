@@ -6,6 +6,8 @@ from . import blade_loading
 from . import clearance
 from . import disc_friction
 from . import recirculation
+from . import incidence
+from . import wake_mixing
 
 __all__ = [
     "skin_friction",
@@ -13,4 +15,6 @@ __all__ = [
     "clearance",
     "disc_friction",
     "recirculation",
+    "incidence",
+    "wake_mixing",
 ]

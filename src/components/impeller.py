@@ -1,327 +1,465 @@
-"""
-Impeller component - Hybrid RadComp + TurboFlow approach
-"""
+"""Impeller component (kept identical to RadComp reference)."""
 
-from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
-import numpy as np
-from math import pi, sin, cos, tan, atan, radians, degrees
+import math
+from dataclasses import InitVar, dataclass, field
+from math import atan, cos, pi, sin, tan
+from typing import Dict, List, Optional
+from types import SimpleNamespace
+
 from scipy import optimize
 
-from geometry. geometry import Geometry
-from conditions.operating import (
-    OperatingCondition, ThermoProp, 
-    static_from_total, total_from_static
-)
+from geometry.geometry import Geometry
+from conditions.operating import OperatingCondition, ThermoProp, static_from_total, total_from_static
+from components.inducer import Inducer, InducerState
+from utils import moody
 from losses.registry import LossModelRegistry, LossContext
 
 
+class ThermoException(Exception):
+    """Raised when thermo calculations fail (parity with RadComp)."""
+
+
 @dataclass
-class ImpellerState:
-    """State at a station in the impeller"""
-    total:  Optional[ThermoProp] = None
-    static: Optional[ThermoProp] = None
-    relative:  Optional[ThermoProp] = None
-    isentropic: Optional[ThermoProp] = None
-    
-    # Velocities
-    c:  float = 0.0      # Absolute velocity
-    w: float = 0.0      # Relative velocity
-    c_m: float = 0.0    # Meridional component (absolute)
-    c_t: float = 0.0    # Tangential component (absolute)
-    w_m: float = 0.0    # Meridional component (relative)
-    w_t: float = 0.0    # Tangential component (relative)
-    
-    # Angles
-    alpha: float = 0.0  # Absolute flow angle
-    beta: float = 0.0   # Relative flow angle
-    
-    # Mach numbers
-    m_abs: float = 0.0  # Absolute Mach number
-    m_rel: float = 0.0  # Relative Mach number
+class ImpellerState(InducerState):
+    relative: ThermoProp = field(default_factory=ThermoProp)
+    w: float = math.nan
+    ws: float = math.nan
+    m_abs_m: float = math.nan
+    m_rel: float = math.nan
+    m_rels: float = math.nan
+    beta: float = math.nan
 
 
 @dataclass
 class ImpellerLosses:
-    """Impeller losses"""
-    incidence: float = 0.0
-    skin_friction: float = 0.0
-    blade_loading: float = 0.0
-    clearance: float = 0.0
-    disc_friction: float = 0.0
-    recirculation: float = 0.0
-    total: float = 0.0
-    
-    def compute_total(self):
-        """Compute total losses"""
-        self.total = (
-            self.incidence + 
-            self.skin_friction + 
-            self.blade_loading + 
-            self.clearance + 
-            self.disc_friction + 
-            self.recirculation
-        )
-        return self.total
+    skin_friction: float = math.nan
+    blade_loading: float = math.nan
+    clearance: float = math.nan
+    incidence: float = math.nan
+    disc_friction: float = math.nan
+    recirculation: float = math.nan
 
 
 @dataclass
 class Impeller:
-    """
-    Impeller component with hybrid calculation approach
-    """
-    geom: Geometry
-    op:  OperatingCondition
-    ind: Any  # Inducer object
-    loss_config: Dict  # Loss model configuration
-    
-    # States
-    in2: ImpellerState = field(default_factory=ImpellerState)
-    out:  ImpellerState = field(default_factory=ImpellerState)
+    geom: InitVar[Geometry]
+    op: InitVar[OperatingCondition]
+    ind: InitVar[Inducer]
+    in2: ImpellerState = field(init=False)
+    in3: ImpellerState = field(default_factory=ImpellerState)
+    out: ImpellerState = field(default_factory=ImpellerState)
     losses: ImpellerLosses = field(default_factory=ImpellerLosses)
-    
-    # Performance metrics
-    dh0s: float = 0.0
-    eff: float = 0.0
-    choke_flag: bool = False
-    wet:  bool = False
-    
-    def __post_init__(self):
-        """Initialize and calculate impeller"""
-        self.in2.total = self.ind.out.total
-        self.in2.c = self.ind.out.c
-        self.calculate()
-    
-    def calculate(self):
-        """
-        Main calculation routine (RadComp style with TurboFlow losses)
-        """
-        # Step 1: Calculate inlet velocity triangle
-        self._calculate_inlet_triangle()
-        
-        if self.choke_flag or self.wet:
+    loss_config: Optional[Dict[str, str]] = None
+    registry_losses: Dict[str, float] = field(default_factory=dict)
+    dh0s: float = math.nan
+    eff: float = math.nan
+    choke_flag = False
+    wet = False
+
+    def __post_init__(
+        self, geom: Geometry, op: OperatingCondition, ind: Inducer
+    ) -> None:
+        self.in2 = ImpellerState.from_state(ind.out)
+        if self.out.is_not_set:
+            self.calculate(geom, op)
+
+    def skin_friction_losses(self, geom: Geometry, w4: float, tp4: ThermoProp) -> float:
+        """Jansen, Coppage-Galvas skin friction losses."""
+        Dh, Lh = geom.hydraulic_diameter
+        Re = (
+            Dh
+            * (self.in2.w + w4)
+            / 2
+            * (self.in2.static.D + tp4.D)
+            / 2
+            / ((self.in2.static.V + tp4.V) / 2)
+        )
+        Cf = moody(Re, geom.rug_imp / Dh)
+        return 4 * Cf * Lh * ((self.in2.w + w4) / 2) ** 2 / (2 * Dh)
+
+    def diffusion_factor(
+        self, geom: Geometry, out_H: float, w4: float, n_rot: float
+    ) -> float:
+        _, Lh = geom.hydraulic_diameter
+        wx = self.in2.w
+        dh_aero = (out_H) / (n_rot * geom.r4) ** 2
+        Df = (
+            1
+            - w4 / wx
+            + pi
+            * geom.r4**2
+            * dh_aero
+            * n_rot
+            / ((geom.n_blades + geom.n_splits) * Lh * wx)
+            + 0.1
+            * (geom.r2s - geom.r2h + geom.b4)
+            / 2
+            / (geom.r4 - geom.r2s)
+            * (1 + w4 / wx)
+        )
+        return Df
+
+    def blade_loading_losses(self, geom: Geometry, Df: float, n_rot: float) -> float:
+        """Impeller blade loading/diffusion losses (Rodgers)."""
+        return 0.05 * Df**2 * (n_rot * geom.r4) ** 2
+
+    def clearance_losses(
+        self, geom: Geometry, tp4: ThermoProp, c4t: float, n_rot: float
+    ) -> float:
+        """Impeller tip clearance losses (Jansen, Brasz)."""
+        c4t = abs(c4t)
+        tip_speed = n_rot * geom.r4
+        return (
+            0.6
+            * geom.clearance
+            / geom.b4
+            * c4t
+            / tip_speed
+            * (
+                4
+                * pi
+                / geom.b4
+                / geom.n_blades
+                * c4t
+                * self.in2.c
+                * cos(geom.alpha2 / 180 * pi)
+                / tip_speed**2
+                * (geom.r2s**2 - geom.r2h**2)
+                / ((geom.r4 - geom.r2s) * (1 + tp4.D / self.in2.static.D))
+            )
+            ** 0.5
+            * tip_speed**2
+        )
+
+    def disc_friction_losses(
+        self, geom: Geometry, tp4: ThermoProp, m: float, n_rot: float
+    ) -> float:
+        """Daily & Nece disc friction losses."""
+        Re_y = 2.0 * n_rot * geom.r4**2 * tp4.D / tp4.V
+        if Re_y > 3e5:
+            Kf = 0.102 * (geom.backface / geom.r4) ** 0.1 / Re_y**0.2
+        else:
+            Kf = 3.7 * (geom.backface / geom.r4) ** 0.1 / Re_y**0.5
+        return 0.25 * (tp4.D) * n_rot * geom.r4**3 * Kf / m * (n_rot * geom.r4) ** 2
+
+    def recirculation_losses(
+        self, geom: Geometry, Df: float, alpha: float, n_rot: float
+    ) -> float:
+        """Impeller recirculation losses (Coppage)."""
+        return 0.02 * Df**2 * tan(abs(alpha / 180 * pi)) * (n_rot * geom.r4) ** 2
+
+    def _apply_registry_losses(
+        self,
+        geom: Geometry,
+        op: OperatingCondition,
+        *,
+        c2_theta: float,
+        c4: float,
+        c4m: float,
+        c4t: float,
+        w4: float,
+        alpha: float,
+    ) -> None:
+        """Apply optional registry losses and update outlet state if present."""
+
+        if not self.loss_config:
             return
-        
-        # Step 2:  Solve discharge triangle iteratively
-        self._solve_discharge_triangle()
-        
-        if self.choke_flag:
-            return
-        
-        # Step 3: Calculate losses using TurboFlow registry
-        self._calculate_losses()
-        
-        # Step 4: Calculate performance metrics
-        self._calculate_performance()
-    
-    def _calculate_inlet_triangle(self):
-        """Calculate velocity triangle at impeller inlet (Station 2)"""
-        geom = self.geom
-        op = self.op
-        
-        # Absolute velocity components
-        c2 = self.in2.c
-        c2_theta = c2 * sin(radians(geom.alpha2))
-        c2_m = c2 * cos(radians(geom.alpha2))
-        
-        # Relative velocity at shroud
-        w2t_s = geom.r2s * op.n_rot - c2_theta
-        beta2_fs = -degrees(atan(w2t_s / c2_m))
-        w2_s = c2_m / cos(radians(beta2_fs))
-        
-        # Relative velocity at RMS radius
-        w2t = geom.r2rms * op.n_rot - c2_theta
-        beta2_f = -degrees(atan(w2t / c2_m))
-        w2 = c2_m / cos(radians(beta2_f))
-        
-        # Store values
-        self.in2.w = w2
-        self.in2.beta = beta2_f
-        self.in2.c_m = c2_m
-        self.in2.c_t = c2_theta
-        self.in2.w_m = c2_m
-        self.in2.w_t = w2t
-        
-        # Calculate thermodynamic state
+
+        # Build a lightweight impeller context expected by registry models
+        st2_ctx = SimpleNamespace(**vars(self.in2))
+        st2_ctx.W = self.in2.w
+        st2_ctx.Ws = getattr(self.in2, "ws", self.in2.w)
+
+        st4_ctx = SimpleNamespace(**vars(self.out))
+        st4_ctx.W = self.out.w
+        st4_ctx.alpha = alpha * pi / 180  # registry models expect radians
+
+        geom_ctx = SimpleNamespace(**vars(geom))
+        # Provide impeller-exit aliases expected by wake-mixing models
+        geom_ctx.r_out = geom.r4
+        geom_ctx.b_out = geom.b4
+        geom_ctx.A_out = 2 * math.pi * geom.r4 * geom.b4 * geom.blockage[3]
+        if not hasattr(geom_ctx, "wake_width"):
+            geom_ctx.wake_width = 0.366  # default used in wake mixing correlation
+
+        triangle = {
+            "alpha_out": alpha,  # degrees
+            "v_out": c4,
+            "v_m_out": c4m,
+            "w_t_out": (geom.r4 * op.n_rot) - c4t,
+            "w_in": self.in2.w,
+            "w_out": w4,
+            "delta_W": 0.0,
+        }
+
+        imp_ctx = LossContext(
+            component="impeller",
+            geometry=geom_ctx,
+            operating_condition=op,
+            inlet_state=self.in2,
+            outlet_state=self.out,
+            velocity_triangle=triangle,
+        )
+
+        # Attach legacy attributes expected by ImpellerContext-based models
+        # (they access .geom, .st2, .st4, and kinematic terms)
+        setattr(imp_ctx, "geom", geom)
+        setattr(imp_ctx, "st2", st2_ctx)
+        setattr(imp_ctx, "st4", st4_ctx)
+        setattr(imp_ctx, "U2", op.n_rot * geom.r2rms)
+        setattr(imp_ctx, "U4", op.n_rot * geom.r4)
+        setattr(imp_ctx, "V2", self.in2.c)
+        setattr(imp_ctx, "V4", c4)
+        setattr(imp_ctx, "V2u", c2_theta)
+        setattr(imp_ctx, "V4u", c4t)
+        setattr(imp_ctx, "W2", self.in2.w)
+        setattr(imp_ctx, "W4", w4)
+
         try:
-            self.in2.static = static_from_total(self.in2.total, c2)
+            losses = LossModelRegistry.calculate_losses(imp_ctx, self.loss_config)
+            losses["total"] = sum(losses.values()) if losses else 0.0
+            self.registry_losses = losses
+
+            total_loss = losses["total"]
+            if total_loss > 0:
+                new_total = op.fld.thermo_prop("PH", self.out.total.P, self.out.total.H + total_loss)
+                new_static = static_from_total(new_total, c4)
+
+                self.out.total = new_total
+                self.out.static = new_static
+                self.out.m_abs = c4 / self.out.static.A
+                self.out.m_abs_m = c4 * cos(alpha * pi / 180) / self.out.static.A
+                self.out.m_rel = w4 / self.out.static.A
+        except Exception:
+            self.registry_losses = {}
+
+    def calculate(self, geom: Geometry, op: OperatingCondition) -> None:
+        # Impeller inlet triangle
+        c2_theta = self.in2.c * sin(geom.alpha2 * pi / 180)
+        c2_m = self.in2.c * cos(geom.alpha2 * pi / 180)
+        w2t_s = geom.r2s * op.n_rot - c2_theta  # @ shroud
+        beta2_fs = -atan(w2t_s / c2_m) * 180 / pi  # @ shroud
+        w2_s = c2_m / cos(beta2_fs / 180 * pi)  # @ shroud
+
+        w2t = geom.r2rms * op.n_rot - c2_theta
+        beta2_f = -atan(w2t / c2_m) * 180 / pi
+        w2 = c2_m / cos(beta2_f / 180 * pi)
+
+        try:
             self.in2.relative = total_from_static(self.in2.static, w2)
-        except Exception: 
+        except ThermoException:
             self.wet = True
             return
-        
-        # Mach numbers
-        self.in2.m_abs = c2 / self.in2.static.A
+
+        self.in2.ws = w2_s
+        self.in2.w = w2
         self.in2.m_rel = w2 / self.in2.static.A
-        
-        # Check for choking
+        self.in2.m_rels = w2_s / self.in2.static.A
+
         if self.in2.m_rel >= 0.99:
             self.choke_flag = True
-    
-    def _solve_discharge_triangle(self):
-        """Solve discharge velocity triangle iteratively"""
-        geom = self.geom
-        op = self.op
-        
-        # Initial guesses
-        beta4_f_guess = geom.beta4  # Start with blade angle
-        P4_guess = self.in2.total.P * 1.5  # Assume some pressure rise
-        
-        def residuals(x):
-            beta4_f, P4 = x
-            err = []
-            
-            # Calculate effective area
-            A4_total = geom.A4_eff
-            
-            # Solve for w4 (relative velocity)
-            w4 = op.m / (A4_total * self.in2.static.D) / cos(radians(beta4_f))
-            
-            # Calculate absolute velocity components
-            c4m = op.m / A4_total / self.in2.static.D
-            c4t = c4m * tan(radians(geom.beta4)) + geom.slip * (geom.r4 * op.n_rot)
-            
-            # Relative tangential component
-            w4t = (geom.r4 * op.n_rot) - c4t
-            
-            # New relative velocity
-            w4_new = np.sqrt(w4t**2 + c4m**2)
-            beta4_f_new = -degrees(np.arcsin(w4t / w4_new))
-            
-            # Error in beta
-            err.append((beta4_f_new - beta4_f) / 60.0)
-            
-            # Calculate absolute velocity
-            c4 = np.sqrt(c4t**2 + c4m**2)
-            alpha4 = degrees(atan(c4t / c4m))
-            
-            # Thermodynamic state
-            try: 
-                tp4_tot = total_from_static(self.in2.static, c4)  # Simplified
-                out_H = tp4_tot. H - self.in2.total.H
-                
-                # Calculate losses (simplified for iteration)
-                # Full loss calculation happens after convergence
-                dh_losses_est = 0.1 * out_H  # Rough estimate
-                
-                # Energy balance
-                work_input = (geom.r4 * op. n_rot) * c4t
-                H4_expected = self.in2.total.H + work_input - dh_losses_est
-                
-                # Error in enthalpy
-                err.append((tp4_tot.H - H4_expected) / H4_expected)
-                
-            except Exception:
-                err = [100.0, 100.0]  # Large error if calculation fails
-            
-            return err
-        
-        # Solve system
+            return
+
+        beta2_opt = atan(geom.A_x / geom.A_y * tan(geom.beta2 / 180 * pi)) * 180 / pi
+        dh_inc = 0.5 * (w2 * sin(abs(abs(beta2_f) - abs(beta2_opt)) / 180 * pi)) ** 2
         try:
-            sol = optimize.root(residuals, x0=[beta4_f_guess, P4_guess], tol=1e-4)
-            
-            if not sol.success or (np.abs(sol.fun) > 0.01).any():
-                self.choke_flag = True
-                return
-            
-            beta4_f, P4 = sol.x
-            
-            # Store solution
-            self.out.beta = beta4_f
-            
-            # Calculate final discharge state
-            A4_total = geom.A4_eff
-            w4 = op.m / (A4_total * self.in2.static.D) / cos(radians(beta4_f))
-            c4m = op.m / A4_total / self.in2.static.D
-            c4t = c4m * tan(radians(geom.beta4)) + geom.slip * (geom.r4 * op.n_rot)
-            c4 = np.sqrt(c4t**2 + c4m**2)
-            alpha4 = degrees(atan(c4t / c4m))
-            
-            # Store velocities
-            self.out.c = c4
-            self.out.w = w4
-            self.out.c_m = c4m
-            self.out. c_t = c4t
-            self.out.alpha = alpha4
-            self.out.w_m = c4m
-            self.out. w_t = (geom.r4 * op.n_rot) - c4t
-            
-            # Thermodynamic state
-            self.out.static = static_from_total(self.in2.relative, w4)
-            self.out. total = total_from_static(self.out.static, c4)
-            self.out.relative = total_from_static(self.out.static, w4)
-            self.out.isentropic = ThermoProp. from_coolprop(
-                op.fld, "PS", self.out.total.P, self.in2.static.S
+            rel3_temp = op.fld.thermo_prop(
+                "HS", self.in2.relative.H - dh_inc, self.in2.relative.S
             )
-            
-            # Mach numbers
-            self.out.m_abs = c4 / self.out.static.A
-            self.out.m_rel = w4 / self. out.static.A
-            
-            # Check for choking
-            if self.out.m_rel >= 0.99 or self.out.m_abs >= 0.99:
-                self.choke_flag = True
-                return
-            
-            if self.out.total.P < self.in2.total.P:
-                self.choke_flag = True
-                
-        except Exception as e:
-            print(f"Discharge triangle solution failed: {e}")
+        except ThermoException:
             self.choke_flag = True
-    
-    def _calculate_losses(self):
-        """Calculate all losses using TurboFlow registry"""
-        # Diffusion factor (for several loss correlations)
-        out_H = self.out.total.H - self.in2.total.H
-        Df = 1 - self.out.w / self.in2.w + (out_H / (self.geom.r4 * self. op.n_rot)**2)
-        
-        # Create loss context
-        velocity_triangle = {
-            "w2": self.in2.w,
-            "w4": self.out.w,
-            "v_t4": self.out.c_t,
-            "v_m4": self.out.c_m,
-            "alpha4": self.out.alpha,
-            "diffusion_factor": Df,
-            "flow_coefficient": self. out.c_m / (self.geom.r4 * self.op.n_rot),
-        }
-        
-        context = LossContext(
-            component="impeller",
-            geometry=self.geom,
-            operating_condition=self.op,
-            inlet_state=self.in2.static,
-            outlet_state=self.out.static,
-            velocity_triangle=velocity_triangle
+            return
+        self.in3.relative = op.fld.thermo_prop("PH", rel3_temp.P, self.in2.relative.H)
+
+        self.losses.incidence = dh_inc
+
+        def resolve_static(x):
+            w3 = float(x[0]) if hasattr(x, "__len__") else float(x)
+            try:
+                stat3 = static_from_total(self.in2.relative, w3)
+            except ThermoException:
+                return 1e4
+
+            return (op.m - geom.A_y * w3 * stat3.D) / op.m
+
+        w3_guess = float(0.65 * self.in2.relative.A)
+        sol = optimize.root(resolve_static, x0=w3_guess)
+        if (sol.fun > 0.001).any():
+            self.choke_flag = True
+            return
+
+        w3_throat = float(sol.x[0])
+        self.in3.static = static_from_total(self.in2.relative, w3_throat)
+
+        c3_m = c2_m * geom.A_x / geom.A_y
+        c3 = c3_m / cos(geom.alpha2 * pi / 180)
+        self.in3.m_rel = w3_throat / self.in3.static.A
+        self.in3.m_abs = c3 / self.in3.static.A
+
+        # Inlet checks
+        self.in3.total = total_from_static(self.in3.static, c3)
+        self.in3.w = w3_throat
+        self.in3.c = c3
+
+        # Impeller discharge
+        h4_rel = (
+            0.5 * ((geom.r4 * op.n_rot) ** 2 - (geom.r2rms * op.n_rot) ** 2)
+            + self.in2.relative.H
         )
-        
-        # Calculate each loss using registered models
-        self.losses.skin_friction = LossModelRegistry. get_model(
-            "impeller", self.loss_config. get("skin_friction", "jansen_skin_friction")
-        )(context)
-        
-        self.losses.blade_loading = LossModelRegistry.get_model(
-            "impeller", self. loss_config.get("blade_loading", "rodgers_blade_loading")
-        )(context)
-        
-        self.losses.clearance = LossModelRegistry.get_model(
-            "impeller", self. loss_config.get("clearance", "jansen_clearance")
-        )(context)
-        
-        self.losses.disc_friction = LossModelRegistry.get_model(
-            "impeller", self.loss_config.get("disc_friction", "daily_nece_disc_friction")
-        )(context)
-        
-        self.losses.recirculation = LossModelRegistry.get_model(
-            "impeller", self. loss_config.get("recirculation", "rodgers_recirculation")
-        )(context)
-        
-        # Compute total losses
-        self.losses. compute_total()
-    
-    def _calculate_performance(self):
-        """Calculate performance metrics"""
-        self.dh0s = self. out.isentropic.H - self. in2.total.H
+        try:
+            tp4_rel = op.fld.thermo_prop("HS", h4_rel, self.in2.relative.S)
+        except ThermoException:
+            self.choke_flag = True
+            return
+
+        if tp4_rel.phase == "twophase":
+            self.wet = True
+            return
+        A4_total = 2 * pi * geom.r4 * geom.b4 * geom.blockage[3]
+
+        def resolve_discharge_triangle(x: List[float]) -> List[float]:
+            beta4_f, w4, dh_losses, p4_rel = x
+
+            dh_lo = dh_losses
+            if dh_losses < 0:
+                dh_lo = 0
+
+            p4r = p4_rel
+            if p4_rel <= 0:
+                p4r = tp4_rel.P
+
+            err = []
+            try:
+                tp4_r = op.fld.thermo_prop("PH", p4r, h4_rel + dh_lo)
+                # Part 1: triangle discharge
+                A4_rel = A4_total * cos(beta4_f * pi / 180)
+
+                tp4_stat = static_from_total(tp4_r, w4)
+
+                err.append((op.m - A4_rel * w4 * tp4_stat.D) / op.m)
+
+                c4m = op.m / A4_total / tp4_stat.D
+                c4t = c4m * tan(geom.beta4 / 180 * pi) + geom.slip * (
+                    geom.r4 * op.n_rot
+                )
+                w4t = (geom.r4 * op.n_rot) - c4t
+
+                w4_new = (w4t**2 + c4m**2) ** 0.5
+                beta4_f_new = -math.asin(w4t / w4_new) * 180 / pi
+                err.append((beta4_f_new - beta4_f) / 60.0)
+
+                # Part 2: pressure and losses
+                c4 = (c4t**2 + c4m**2) ** 0.5
+                alpha = atan(c4t / c4m) * 180 / pi
+
+                tp4_tot = total_from_static(tp4_stat, c4)
+                out_H = tp4_tot.H - self.in2.total.H
+                Df = self.diffusion_factor(geom, out_H, w4, op.n_rot)
+
+                # Internal losses
+                dh_sf = self.skin_friction_losses(geom, w4, tp4_stat)
+                dh_bl = self.blade_loading_losses(geom, Df, op.n_rot)
+                dh_cl = self.clearance_losses(geom, tp4_stat, c4t, op.n_rot)
+                dh_losses_int = dh_sf + dh_bl + dh_cl + dh_inc
+
+                # External losses
+                dh_df = self.disc_friction_losses(geom, tp4_stat, op.m, op.n_rot)
+                dh_r = self.recirculation_losses(geom, Df, alpha, op.n_rot)
+                dh_losses_ext = dh_df + dh_r
+
+                err.append((dh_losses_ext - dh_losses) / self.in2.relative.H)
+
+                # Correct pressure
+                tp4_temp = op.fld.thermo_prop(
+                    "HS", h4_rel - dh_losses_int, self.in2.relative.S
+                )
+
+                err.append(
+                    (tp4_temp.P - tp4_r.P) / self.in2.relative.P + (abs(p4_rel - p4r))
+                )
+
+            except ThermoException:
+                err.extend([1e4] * (4 - len(err)))
+
+            return err
+
+        # Guesses
+        beta4_f0 = geom.beta4 - 10.0
+        A4_rel = (
+            2 * pi * geom.r4 * geom.b4 * geom.blockage[3] * cos(beta4_f0 * pi / 180)
+        )
+        w4_guess = op.m / A4_rel / tp4_rel.D
+
+        dh_df_guess = self.disc_friction_losses(geom, tp4_rel, op.m, op.n_rot)
+
+        sol = optimize.root(
+            resolve_discharge_triangle,
+            x0=[beta4_f0, w4_guess, dh_df_guess, tp4_rel.P],
+            tol=1e-4,
+        )
+        if (sol.fun > 0.001).any():
+            self.choke_flag = True
+            return
+
+        beta4_f, w4, dh_losses, p4_rel = sol.x
+        self.out.w = w4
+        self.out.relative = op.fld.thermo_prop("PH", p4_rel, h4_rel + dh_losses)
+        self.out.static = static_from_total(self.out.relative, w4)
+
+        c4m = op.m / A4_total / self.out.static.D
+        c4t = c4m * tan(geom.beta4 / 180 * pi) + geom.slip * (geom.r4 * op.n_rot)
+        # w4t = (geom.r4*op.n_rot) - c4t
+        c4 = (c4t**2 + c4m**2) ** 0.5
+        self.out.c = c4
+        alpha = atan(c4t / c4m) * 180 / pi
+        try:
+            self.out.total = total_from_static(self.out.static, c4)
+        except:
+            print(c4, w4)
+            raise
+        self.out.isentropic = op.fld.thermo_prop(
+            "PS", self.out.total.P, self.in2.static.S
+        )
+
         out_H = self.out.total.H - self.in2.total.H
-        self. eff = self. dh0s / out_H if out_H > 0 else 0.0
+        Df = self.diffusion_factor(geom, out_H, w4, op.n_rot)
+
+        self.losses.skin_friction = self.skin_friction_losses(geom, w4, self.out.static)
+        self.losses.blade_loading = self.blade_loading_losses(geom, Df, op.n_rot)
+        self.losses.clearance = self.clearance_losses(
+            geom, self.out.static, c4t, op.n_rot
+        )
+
+        self.losses.disc_friction = self.disc_friction_losses(
+            geom, self.out.static, op.m, op.n_rot
+        )
+        self.losses.recirculation = self.recirculation_losses(geom, Df, alpha, op.n_rot)
+
+        # Apply optional registry losses (may adjust outlet totals)
+        self._apply_registry_losses(
+            geom,
+            op,
+            c2_theta=c2_theta,
+            c4=c4,
+            c4m=c4m,
+            c4t=c4t,
+            w4=w4,
+            alpha=alpha,
+        )
+
+        self.out.m_abs = c4 / self.out.static.A
+        self.out.m_abs_m = c4 * cos(alpha * pi / 180) / self.out.static.A
+        self.out.m_rel = w4 / self.out.static.A
+
+        self.out.beta = beta4_f
+        self.out.alpha = alpha
+
+        self.dh0s = self.out.isentropic.H - self.in2.total.H
+        out_H = self.out.total.H - self.in2.total.H
+        self.eff = self.dh0s / out_H if out_H != 0 else math.nan
+
+        if self.out.m_rel >= 0.99 or self.out.m_abs_m >= 0.99:
+            self.choke_flag = True
+
+        if self.out.total.P < self.in2.total.P:
+            self.choke_flag = True
